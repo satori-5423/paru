@@ -8,6 +8,7 @@ use crate::{info, printtr};
 
 use ansiterm::Style;
 use anyhow::{ensure, Context, Result};
+use flate2::read::GzDecoder;
 use indicatif::HumanBytes;
 use raur::{Raur, SearchBy};
 use regex::RegexSet;
@@ -95,7 +96,7 @@ fn search_pkgbuilds<'a>(
                     || pkg
                         .provides
                         .iter()
-                        .flat_map(|p| &p.vec)
+                        .flat_map(|p| p.values())
                         .any(|p| regex.is_match(p))
                     || pkg.groups.iter().any(|g| regex.is_match(g))
                 {
@@ -172,13 +173,15 @@ async fn search_aur_regex(config: &Config, targets: &[String]) -> Result<Vec<rau
     let success = resp.status().is_success();
     ensure!(success, "get {}: {}", url, resp.status());
 
-    let data = resp.text().await?;
+    let data = resp.bytes().await?;
+    let decoder = GzDecoder::new(&*data);
+    let data =
+        std::io::read_to_string(decoder).with_context(|| tr!("failed to decode package list"))?;
 
     let regex = RegexSet::new(targets)?;
 
     let pkgs = data
         .lines()
-        .skip(1)
         .filter(|pkg| regex.is_match(pkg))
         .collect::<Vec<_>>();
     ensure!(pkgs.len() < 2000, "too many packages");
@@ -265,7 +268,7 @@ fn print_pkgbuild_pkg(
     let c = config.color;
 
     let name = if let Some(url) = &pkg.url {
-        link_str(c.enabled, &c.ss_name.paint(&pkg.pkgname), &url)
+        link_str(c.enabled, &c.ss_name.paint(&pkg.pkgname), url)
     } else {
         c.ss_name.paint(&pkg.pkgname).to_string()
     };
@@ -313,7 +316,7 @@ fn print_pkg(config: &Config, pkg: &raur::Package, quiet: bool) {
         aur
     };
     let name = if let Some(url) = &pkg.url {
-        link_str(c.enabled, &c.ss_name.paint(&pkg.name), &url)
+        link_str(c.enabled, &c.ss_name.paint(&pkg.name), url)
     } else {
         c.ss_name.paint(&pkg.name).to_string()
     };
@@ -389,7 +392,7 @@ fn print_alpm_pkg(config: &Config, pkg: &alpm::Package, quiet: bool) {
     }
 
     let name = if let Some(url) = pkg.url() {
-        link_str(c.enabled, &c.ss_name.paint(pkg.name()), &url)
+        link_str(c.enabled, &c.ss_name.paint(pkg.name()), url)
     } else {
         c.ss_name.paint(pkg.name()).to_string()
     };

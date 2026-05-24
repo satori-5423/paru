@@ -1,12 +1,13 @@
 use crate::config::Config;
 use crate::print_error;
 
-use std::fs::{create_dir_all, metadata, OpenOptions};
-use std::io::{stdout, BufRead, BufReader, Write};
+use std::fs::{create_dir_all, metadata, remove_file, OpenOptions};
+use std::io::{stdout, BufRead, BufReader, Read, Write};
 use std::path::Path;
 use std::time::{Duration, SystemTime};
 
 use anyhow::{ensure, Context, Result};
+use flate2::read::GzDecoder;
 use reqwest::get;
 use tr::tr;
 use url::Url;
@@ -20,6 +21,9 @@ async fn save_aur_list(aur_url: &Url, cache_dir: &Path) -> Result<()> {
     ensure!(success, "get {}: {}", url, resp.status());
 
     let data = resp.bytes().await?;
+    let decoder = GzDecoder::new(&*data);
+    let data =
+        std::io::read_to_string(decoder).with_context(|| tr!("failed to decode package list"))?;
 
     create_dir_all(cache_dir)?;
     let path = cache_dir.join("packages.aur");
@@ -30,11 +34,9 @@ async fn save_aur_list(aur_url: &Url, cache_dir: &Path) -> Result<()> {
         .open(&path);
     let mut file = file.with_context(|| tr!("failed to open cache file '{}'", path.display()))?;
 
-    for line in data.split(|&c| c == b'\n').skip(1) {
-        if !line.is_empty() {
-            file.write_all(line)?;
-            file.write_all(b"\n")?;
-        }
+    for line in data.lines().filter(|l| !l.is_empty()) {
+        file.write_all(line.as_bytes())?;
+        file.write_all(b"\n")?;
     }
 
     Ok(())
@@ -43,6 +45,18 @@ async fn save_aur_list(aur_url: &Url, cache_dir: &Path) -> Result<()> {
 pub async fn update_aur_cache(aur_url: &Url, cache_dir: &Path, timeout: Option<u64>) -> Result<()> {
     let path = cache_dir.join("packages.aur");
     let metadata = metadata(&path);
+
+    if let Ok(mut file) = OpenOptions::new().read(true).open(&path) {
+        let mut buf = vec![0; 1024];
+        if let Ok(n) = file.read(&mut buf) {
+            if buf[0..n].contains(&b'\0') {
+                let _ = std::fs::remove_file(&path);
+                let _ = remove_file(&path);
+                save_aur_list(aur_url, cache_dir).await?;
+                return Ok(());
+            }
+        }
+    }
 
     let need_refresh = match metadata {
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => true,
@@ -93,7 +107,7 @@ fn repo_list<W: Write>(config: &Config, w: &mut W) {
 fn pkgbuild_list<W: Write>(config: &Config, w: &mut W) {
     for db in &config.pkgbuild_repos.repos {
         for base in db.pkgs(config) {
-            for pkg in base.srcinfo.names() {
+            for pkg in base.srcinfo.pkgnames() {
                 let _ = w.write_all(pkg.as_bytes());
                 let _ = w.write_all(b" ");
                 let _ = w.write_all(db.name.as_bytes());

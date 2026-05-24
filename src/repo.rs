@@ -1,5 +1,5 @@
 use crate::config::{Config, LocalRepos, Sign};
-use crate::exec;
+use crate::exec::{self, command_status};
 use crate::fmt::print_indent;
 use crate::printtr;
 use crate::util::ask;
@@ -146,17 +146,6 @@ pub fn file(repo: &Db) -> Option<&str> {
         .map(|s| s.trim_start_matches("file://"))
 }
 
-pub fn all_files(config: &Config) -> Vec<String> {
-    config
-        .alpm
-        .syncdbs()
-        .iter()
-        .flat_map(|db| db.servers())
-        .filter(|f| f.starts_with("file://"))
-        .map(|s| s.trim_start_matches("file://").to_string())
-        .collect()
-}
-
 fn is_local_db(db: &alpm::Db) -> bool {
     !db.servers().is_empty() && db.servers().iter().all(|s| s.starts_with("file://"))
 }
@@ -293,9 +282,7 @@ pub fn refresh<S: AsRef<OsStr>>(config: &mut Config, repos: &[S]) -> Result<i32>
             .arg("-Ly")
             .args(repos);
 
-        let status = cmd.spawn()?.wait()?;
-
-        return Ok(status.code().unwrap_or(1));
+        return Ok(command_status(&mut cmd)?.code());
     }
 
     let mut dbs = config.alpm.syncdbs_mut().to_list_mut();
