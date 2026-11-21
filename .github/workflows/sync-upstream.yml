@@ -1,0 +1,54 @@
+name: Sync Upstream
+
+on:
+  schedule:
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency: sync-upstream
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout fork
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          # GITHUB_TOKEN cannot push commits that touch `.github/workflows/*`,
+          # so use a PAT with Contents + Workflows read/write when available.
+          token: ${{ secrets.SYNC_TOKEN || github.token }}
+
+      - name: Sync with upstream
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          cp .github/workflows/sync-upstream.yml "$RUNNER_TEMP/wf.yml"
+          git remote add upstream https://github.com/morganamilo/paru.git
+          git fetch upstream master
+          git reset --hard upstream/master
+          cp "$RUNNER_TEMP/wf.yml" .github/workflows/sync-upstream.yml
+          sed -i 's/……/.../g' po/*
+          git add -A
+          git diff --cached --quiet || git commit -m 'chore: sync upstream'
+          git push -f origin HEAD:master || {
+            echo "::error::Push rejected; if it mentions 'workflows' permission, set the SYNC_TOKEN secret to a PAT with Contents + Workflows write access."
+            exit 1
+          }
+
+      - name: Keep only the 5 newest runs
+        if: always()
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh run list --workflow=sync-upstream.yml --limit 100 --json databaseId \
+            --jq '.[5:][] | .databaseId' |
+            while read -r id; do
+              gh run delete "$id"
+            done
