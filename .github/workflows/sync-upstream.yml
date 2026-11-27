@@ -1,0 +1,67 @@
+name: Sync Upstream
+
+on:
+  schedule:
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency: sync-upstream
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout fork
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.SYNC_TOKEN || github.token }}
+
+      - name: Sync with upstream
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          cp .github/workflows/sync-upstream.yml "$RUNNER_TEMP/wf.yml"
+          git remote add upstream https://github.com/morganamilo/paru.git
+          git fetch upstream master
+          git reset --hard upstream/master
+          cp "$RUNNER_TEMP/wf.yml" .github/workflows/sync-upstream.yml
+          sed -i 's/……/.../g' po/zh_CN.po
+          git add -A
+          git diff --cached --quiet || git commit -m 'chore: sync upstream'
+          git push -f origin HEAD:master
+
+      - name: Sync tags
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git fetch --no-tags upstream '+refs/tags/*:refs/upstream-tags/*'
+          upstream_tags=$(git for-each-ref --format='%(refname:lstrip=2)' refs/upstream-tags/ | sort -V)
+          [ -z "$upstream_tags" ] && exit 0
+          keep=$(printf '%s\n' "$upstream_tags" | tail -n 3)
+          git config --local --unset-all 'http.https://github.com/.extraheader' || true
+          remote="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git push --force "$remote" $(for tag in $keep; do echo "refs/upstream-tags/$tag:refs/tags/$tag"; done)
+          stale=$(git ls-remote --tags --refs "$remote" | sed 's|.*refs/tags/||' |
+            grep -Fxf <(printf '%s\n' "$upstream_tags") |
+            grep -Fvxf <(printf '%s\n' "$keep") || true)
+          if [ -n "$stale" ]; then
+            git push "$remote" $(for tag in $stale; do echo ":refs/tags/$tag"; done)
+          fi
+
+      - name: Keep only the 5 newest runs
+        if: always()
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh run list --workflow=sync-upstream.yml --limit 100 --json databaseId \
+            --jq '.[5:][] | .databaseId' |
+            while read -r id; do
+              gh run delete "$id"
+            done
